@@ -308,4 +308,29 @@ class WorkerServiceTest {
         assertDoesNotThrow(() -> service.schedule(target));
         assertTrue(target.cleaned.get());
     }
+    // TC-WS-15 (white-box/coverage-driven, evoluzione da Mutation Testing §5) - join(): timeout scaduto -> shutdownNow() invocato davvero
+    @Test
+    @DisplayName("TC-WS-15 (white-box): join() in timeout invoca davvero shutdownNow() sull'executor")
+    void tcWs15_joinTimeoutReallyInvokesShutdownNow() throws InterruptedException {
+        service = new WorkerService("t", 1, false);
+        CountDownLatch blockerStarted = new CountDownLatch(1);
+        CountDownLatch blockerInterrupted = new CountDownLatch(1);
+        WorkRequest slow = new WorkRequest() {
+            @Override public void doWork() throws Exception {
+                blockerStarted.countDown();
+                try {
+                    new CountDownLatch(1).await(); // blocco indefinito: esce solo se interrotto
+                } catch (InterruptedException e) {
+                    blockerInterrupted.countDown();
+                    throw e;
+                }
+            }
+        };
+        service.schedule(slow);
+        assertTrue(blockerStarted.await(5, TimeUnit.SECONDS));
+        service.stop();
+        service.join(1); // timeout minimo: terminated sarà sicuramente false
+        assertTrue(blockerInterrupted.await(5, TimeUnit.SECONDS),
+                "shutdownNow() deve interrompere il thread bloccato quando join() va in timeout");
+    }
 }
