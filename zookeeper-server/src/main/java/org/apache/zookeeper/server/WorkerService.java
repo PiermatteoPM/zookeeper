@@ -220,7 +220,8 @@ public class WorkerService {
                     terminated = worker.awaitTermination(endTime - now, TimeUnit.MILLISECONDS);
                     break;
                 } catch (InterruptedException e) {
-                    // ignore
+                    Thread.currentThread().interrupt();
+                    break;
                 }
             }
             if (!terminated) {
