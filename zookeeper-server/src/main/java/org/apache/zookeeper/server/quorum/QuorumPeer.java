@@ -301,110 +301,158 @@ public class QuorumPeer extends ZooKeeperThread implements QuorumStats.Provider 
             setMyAddrs();
         }
 
-        private static final String wrongFormat =
-            " does not have the form server_config or server_config;client_config"
-            + " where server_config is the pipe separated list of host:port:port or host:port:port:type"
-            + " and client_config is port or host:port";
+        private static final String WRONG_FORMAT =
+                " does not have the form server_config or server_config;client_config"
+                        + " where server_config is the pipe separated list of host:port:port or host:port:port:type"
+                        + " and client_config is port or host:port";
 
         private void initializeWithAddressString(String addressStr, Function<InetSocketAddress, InetAddress> getInetAddress) throws ConfigException {
-            LearnerType newType = null;
             String[] serverClientParts = addressStr.split(";");
             String[] serverAddresses = serverClientParts[0].split("\\|");
 
-            if (serverClientParts.length == 2) {
-                String[] clientParts = ConfigUtils.getHostAndPort(serverClientParts[1]);
-                if (clientParts.length > 2) {
-                    throw new ConfigException(addressStr + wrongFormat);
-                }
-
-                // is client_config a host:port or just a port
-                String clientHostName = (clientParts.length == 2) ? clientParts[0] : "0.0.0.0";
-                try {
-                    clientAddr = new InetSocketAddress(clientHostName, Integer.parseInt(clientParts[clientParts.length - 1]));
-                } catch (NumberFormatException e) {
-                    throw new ConfigException("Address unresolved: " + hostname + ":" + clientParts[clientParts.length - 1]);
-                }
-            }
-
-            boolean multiAddressEnabled = Boolean.parseBoolean(
-                System.getProperty(QuorumPeer.CONFIG_KEY_MULTI_ADDRESS_ENABLED, QuorumPeer.CONFIG_DEFAULT_MULTI_ADDRESS_ENABLED));
-            if (!multiAddressEnabled && serverAddresses.length > 1) {
-                throw new ConfigException("Multiple address feature is disabled, but multiple addresses were specified for sid " + this.id);
-            }
+            parseClientAddress(addressStr, serverClientParts);
+            validateMultiAddressConfig(serverAddresses);
 
             boolean canonicalize = Boolean.parseBoolean(
-                System.getProperty(
-                    CONFIG_KEY_KERBEROS_CANONICALIZE_HOST_NAMES,
-                    CONFIG_DEFAULT_KERBEROS_CANONICALIZE_HOST_NAMES));
+                    System.getProperty(
+                            CONFIG_KEY_KERBEROS_CANONICALIZE_HOST_NAMES,
+                            CONFIG_DEFAULT_KERBEROS_CANONICALIZE_HOST_NAMES));
 
-            for (String serverAddress : serverAddresses) {
-                String serverParts[] = ConfigUtils.getHostAndPort(serverAddress);
-                if ((serverClientParts.length > 2) || (serverParts.length < 3)
-                        || (serverParts.length > 4)) {
-                    throw new ConfigException(addressStr + wrongFormat);
-                }
-
-                String serverHostName = serverParts[0];
-
-                // server_config should be either host:port:port or host:port:port:type
-                InetSocketAddress tempAddress;
-                InetSocketAddress tempElectionAddress;
-                try {
-                    tempAddress = new InetSocketAddress(serverHostName, Integer.parseInt(serverParts[1]));
-                    addr.addAddress(tempAddress);
-                } catch (NumberFormatException e) {
-                    throw new ConfigException("Address unresolved: " + serverHostName + ":" + serverParts[1]);
-                }
-                try {
-                    tempElectionAddress = new InetSocketAddress(serverHostName, Integer.parseInt(serverParts[2]));
-                    electionAddr.addAddress(tempElectionAddress);
-                } catch (NumberFormatException e) {
-                    throw new ConfigException("Address unresolved: " + serverHostName + ":" + serverParts[2]);
-                }
-
-                if (tempAddress.getPort() == tempElectionAddress.getPort()) {
-                    throw new ConfigException("Client and election port must be different! Please update the "
-                            + "configuration file on server." + this.id);
-                }
-
-                if (canonicalize) {
-                    InetAddress ia = getInetAddress.apply(tempAddress);
-                    if (ia == null) {
-                        throw new ConfigException("Unable to canonicalize address " + serverHostName + " because it's not resolvable");
-                    }
-
-                    String canonicalHostName = ia.getCanonicalHostName();
-
-                    if (!canonicalHostName.equals(serverHostName)
-                        // Avoid using literal IP address when
-                        // security check fails
-                        && !canonicalHostName.equals(ia.getHostAddress())) {
-                        LOG.info("Host name for quorum server {} "
-                            + "canonicalized from {} to {}",
-                            this.id, serverHostName, canonicalHostName);
-                        serverHostName = canonicalHostName;
-                    }
-                }
-
-                if (serverParts.length == 4) {
-                    LearnerType tempType = getType(serverParts[3]);
-                    if (newType == null) {
-                        newType = tempType;
-                    }
-
-                    if (newType != tempType) {
-                        throw new ConfigException("Multiple addresses should have similar roles: " + type + " vs " + tempType);
-                    }
-                }
-
-                this.hostname = serverHostName;
-            }
-
+            LearnerType newType = parseServerAddresses(addressStr, serverClientParts, serverAddresses, canonicalize, getInetAddress);
             if (newType != null) {
                 type = newType;
             }
 
             setMyAddrs();
+        }
+
+        private void parseClientAddress(String addressStr, String[] serverClientParts) throws ConfigException {
+            if (serverClientParts.length != 2) {
+                return;
+            }
+
+            String[] clientParts = ConfigUtils.getHostAndPort(serverClientParts[1]);
+            if (clientParts.length > 2) {
+                throw new ConfigException(addressStr + WRONG_FORMAT);
+            }
+
+            String clientHostName = (clientParts.length == 2) ? clientParts[0] : "0.0.0.0";
+            try {
+                clientAddr = new InetSocketAddress(clientHostName, Integer.parseInt(clientParts[clientParts.length - 1]));
+            } catch (NumberFormatException e) {
+                throw new ConfigException("Address unresolved: " + hostname + ":" + clientParts[clientParts.length - 1]);
+            }
+        }
+
+        private void validateMultiAddressConfig(String[] serverAddresses) throws ConfigException {
+            boolean multiAddressEnabled = Boolean.parseBoolean(
+                    System.getProperty(QuorumPeer.CONFIG_KEY_MULTI_ADDRESS_ENABLED, QuorumPeer.CONFIG_DEFAULT_MULTI_ADDRESS_ENABLED));
+            if (!multiAddressEnabled && serverAddresses.length > 1) {
+                throw new ConfigException("Multiple address feature is disabled, but multiple addresses were specified for sid " + this.id);
+            }
+        }
+
+        private LearnerType parseServerAddresses(
+                String addressStr,
+                String[] serverClientParts,
+                String[] serverAddresses,
+                boolean canonicalize,
+                Function<InetSocketAddress, InetAddress> getInetAddress) throws ConfigException {
+            LearnerType newType = null;
+
+            for (String serverAddress : serverAddresses) {
+                String[] serverParts = ConfigUtils.getHostAndPort(serverAddress);
+                validateServerParts(addressStr, serverClientParts, serverParts);
+
+                String serverHostName = serverParts[0];
+                InetSocketAddress tempAddress = createServerAddress(serverHostName, serverParts[1]);
+                InetSocketAddress tempElectionAddress = createElectionAddress(serverHostName, serverParts[2]);
+
+                validateQuorumAndElectionPorts(tempAddress, tempElectionAddress);
+
+                if (canonicalize) {
+                    serverHostName = canonicalizeServerHostName(serverHostName, tempAddress, getInetAddress);
+                }
+
+                newType = updateLearnerType(serverParts, newType);
+                this.hostname = serverHostName;
+            }
+
+            return newType;
+        }
+
+        private void validateServerParts(String addressStr, String[] serverClientParts, String[] serverParts) throws ConfigException {
+            if ((serverClientParts.length > 2) || (serverParts.length < 3) || (serverParts.length > 4)) {
+                throw new ConfigException(addressStr + WRONG_FORMAT);
+            }
+        }
+
+        private InetSocketAddress createServerAddress(String serverHostName, String port) throws ConfigException {
+            try {
+                InetSocketAddress tempAddress = new InetSocketAddress(serverHostName, Integer.parseInt(port));
+                addr.addAddress(tempAddress);
+                return tempAddress;
+            } catch (NumberFormatException e) {
+                throw new ConfigException("Address unresolved: " + serverHostName + ":" + port);
+            }
+        }
+
+        private InetSocketAddress createElectionAddress(String serverHostName, String port) throws ConfigException {
+            try {
+                InetSocketAddress tempElectionAddress = new InetSocketAddress(serverHostName, Integer.parseInt(port));
+                electionAddr.addAddress(tempElectionAddress);
+                return tempElectionAddress;
+            } catch (NumberFormatException e) {
+                throw new ConfigException("Address unresolved: " + serverHostName + ":" + port);
+            }
+        }
+
+        private void validateQuorumAndElectionPorts(InetSocketAddress tempAddress, InetSocketAddress tempElectionAddress) throws ConfigException {
+            if (tempAddress.getPort() == tempElectionAddress.getPort()) {
+                throw new ConfigException("Client and election port must be different! Please update the "
+                        + "configuration file on server." + this.id);
+            }
+        }
+
+        private String canonicalizeServerHostName(
+                String serverHostName,
+                InetSocketAddress tempAddress,
+                Function<InetSocketAddress, InetAddress> getInetAddress) throws ConfigException {
+            InetAddress ia = getInetAddress.apply(tempAddress);
+            if (ia == null) {
+                throw new ConfigException("Unable to canonicalize address " + serverHostName + " because it's not resolvable");
+            }
+
+            String canonicalHostName = ia.getCanonicalHostName();
+
+            if (!canonicalHostName.equals(serverHostName)
+                    // Avoid using literal IP address when
+                    // security check fails
+                    && !canonicalHostName.equals(ia.getHostAddress())) {
+                LOG.info("Host name for quorum server {} "
+                                + "canonicalized from {} to {}",
+                        this.id, serverHostName, canonicalHostName);
+                return canonicalHostName;
+            }
+
+            return serverHostName;
+        }
+
+        private LearnerType updateLearnerType(String[] serverParts, LearnerType newType) throws ConfigException {
+            if (serverParts.length != 4) {
+                return newType;
+            }
+
+            LearnerType tempType = getType(serverParts[3]);
+            if (newType == null) {
+                return tempType;
+            }
+
+            if (newType != tempType) {
+                throw new ConfigException("Multiple addresses should have similar roles: " + type + " vs " + tempType);
+            }
+
+            return newType;
         }
 
         private static InetAddress getInetAddress(InetSocketAddress addr) {
@@ -434,11 +482,11 @@ public class QuorumPeer extends ZooKeeperThread implements QuorumStats.Provider 
             List<InetSocketAddress> addrList = new LinkedList<>(addr.getAllAddresses());
             List<InetSocketAddress> electionAddrList = new LinkedList<>(electionAddr.getAllAddresses());
 
-            if (addrList.size() > 0 && electionAddrList.size() > 0) {
+            if (!addrList.isEmpty() && !electionAddrList.isEmpty()) {
                 addrList.sort(Comparator.comparing(InetSocketAddress::getHostString));
                 electionAddrList.sort(Comparator.comparing(InetSocketAddress::getHostString));
                 sw.append(IntStream.range(0, addrList.size()).mapToObj(i -> String.format("%s:%d:%d",
-                        delimitedHostString(addrList.get(i)), addrList.get(i).getPort(), electionAddrList.get(i).getPort()))
+                                delimitedHostString(addrList.get(i)), addrList.get(i).getPort(), electionAddrList.get(i).getPort()))
                         .collect(Collectors.joining("|")));
             }
 
@@ -465,8 +513,8 @@ public class QuorumPeer extends ZooKeeperThread implements QuorumStats.Provider 
 
         private boolean checkAddressesEqual(InetSocketAddress addr1, InetSocketAddress addr2) {
             return (addr1 != null || addr2 == null)
-                   && (addr1 == null || addr2 != null)
-                   && (addr1 == null || addr2 == null || addr1.equals(addr2));
+                    && (addr1 == null || addr2 != null)
+                    && (addr1 == null || addr2 == null || addr1.equals(addr2));
         }
 
         public boolean equals(Object o) {
@@ -506,22 +554,27 @@ public class QuorumPeer extends ZooKeeperThread implements QuorumStats.Provider 
         private List<InetSocketAddress> excludedSpecialAddresses(List<InetSocketAddress> addrs) {
             List<InetSocketAddress> included = new ArrayList<>();
 
-            for (InetSocketAddress addr : addrs) {
-                if (addr == null) {
-                    continue;
+            for (InetSocketAddress socketAddress : addrs) {
+                if (isIncludedAddress(socketAddress)) {
+                    included.add(socketAddress);
                 }
-                InetAddress inetaddr = addr.getAddress();
-
-                if (inetaddr == null || inetaddr.isAnyLocalAddress() // wildCard addresses (0.0.0.0 or [::])
-                    || inetaddr.isLoopbackAddress()) { // loopback address(localhost/127.0.0.1)
-                    continue;
-                }
-                included.add(addr);
             }
             return included;
         }
 
+        private boolean isIncludedAddress(InetSocketAddress socketAddress) {
+            if (socketAddress == null) {
+                return false;
+            }
+
+            InetAddress inetaddr = socketAddress.getAddress();
+            return inetaddr != null
+                    && !inetaddr.isAnyLocalAddress() // wildCard addresses (0.0.0.0 or [::])
+                    && !inetaddr.isLoopbackAddress(); // loopback address(localhost/127.0.0.1)
+        }
+
     }
+
 
     public enum ServerState {
         LOOKING,
