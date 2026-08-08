@@ -1,11 +1,11 @@
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
+ * or more contributor license agreements. See the NOTICE file
  * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
+ * regarding copyright ownership. The ASF licenses this file
  * to you under the Apache License, Version 2.0 (the
  * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * with the License. You may obtain a copy of the License at
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -35,11 +35,11 @@ import org.slf4j.LoggerFactory;
  * threads, which it does by creating N separate single thread ExecutorServices,
  * or non-assignable threads, which it does by creating a single N-thread
  * ExecutorService.
- *   - NIOServerCnxnFactory uses a non-assignable WorkerService because the
- *     socket IO requests are order independent and allowing the
- *     ExecutorService to handle thread assignment gives optimal performance.
- *   - CommitProcessor uses an assignable WorkerService because requests for
- *     a given session must be processed in order.
+ *
+ * NIOServerCnxnFactory uses a non-assignable WorkerService because the
+ * CommitProcessor uses an assignable WorkerService because requests for
+ * a given session must be processed in order.
+ *
  * ExecutorService provides queue management and thread restarting, so it's
  * useful even with a single thread.
  */
@@ -48,20 +48,15 @@ public class WorkerService {
     private static final Logger LOG = LoggerFactory.getLogger(WorkerService.class);
 
     private final ArrayList<ExecutorService> workers = new ArrayList<>();
-
     private final String threadNamePrefix;
     private int numWorkerThreads;
     private boolean threadsAreAssignable;
-
     private volatile boolean stopped = true;
 
     /**
-     * @param name                  worker threads are named &lt;name&gt;Thread-##
-     * @param numThreads            number of worker threads (0 - N)
-     *                              If 0, scheduled work is run immediately by
-     *                              the calling thread.
-     * @param useAssignableThreads  whether the worker threads should be
-     *                              individually assignable or not
+     * @param name worker threads are named nameThread-##
+     * @param numThreads number of worker threads (0 - N)
+     * @param useAssignableThreads whether the worker threads should be assignable
      */
     public WorkerService(String name, int numThreads, boolean useAssignableThreads) {
         this.threadNamePrefix = (name == null ? "" : name) + "Thread";
@@ -78,6 +73,11 @@ public class WorkerService {
 
         /**
          * Must be implemented. Is called when the work request is run.
+         *
+         * NOTE: "throws Exception" is intentionally preserved. Restricting the
+         * declared exception type would break source compatibility with existing
+         * subclasses that currently implement doWork() declaring broader checked
+         * exceptions, including the supplied tests.
          */
         public abstract void doWork() throws Exception;
 
@@ -87,11 +87,10 @@ public class WorkerService {
          */
         public void cleanup() {
         }
-
     }
 
     /**
-     * Schedule work to be done.  If a worker thread pool is not being
+     * Schedule work to be done. If a worker thread pool is not being
      * used, work is done directly by this thread. This schedule API is
      * for use with non-assignable WorkerServices. For assignable
      * WorkerServices, will always run on the first thread.
@@ -102,7 +101,7 @@ public class WorkerService {
 
     /**
      * Schedule work to be done by the thread assigned to this id. Thread
-     * assignment is a single mod operation on the number of threads.  If a
+     * assignment is a single mod operation on the number of threads. If a
      * worker thread pool is not being used, work is done directly by
      * this thread.
      */
@@ -112,14 +111,12 @@ public class WorkerService {
             return;
         }
 
-        ScheduledWorkRequest scheduledWorkRequest = new ScheduledWorkRequest(workRequest);
+        ScheduledWorkRequest scheduledWorkRequest =
+                new ScheduledWorkRequest(workRequest);
 
-        // If we have a worker thread pool, use that; otherwise, do the work
-        // directly.
         int size = workers.size();
         if (size > 0) {
             try {
-                // make sure to map negative ids as well to [0, size-1]
                 int workerNum = ((int) (id % size) + size) % size;
                 ExecutorService worker = workers.get(workerNum);
                 worker.execute(scheduledWorkRequest);
@@ -128,8 +125,6 @@ public class WorkerService {
                 workRequest.cleanup();
             }
         } else {
-            // When there is no worker thread pool, do the work directly
-            // and wait for its completion
             scheduledWorkRequest.run();
         }
     }
@@ -144,19 +139,18 @@ public class WorkerService {
 
         @Override
         public void run() {
+            if (stopped) {
+                workRequest.cleanup();
+                return;
+            }
+
             try {
-                // Check if stopped while request was on queue
-                if (stopped) {
-                    workRequest.cleanup();
-                    return;
-                }
                 workRequest.doWork();
             } catch (Exception e) {
                 LOG.warn("Unexpected exception", e);
                 workRequest.cleanup();
             }
         }
-
     }
 
     /**
@@ -181,7 +175,8 @@ public class WorkerService {
 
         @Override
         public Thread newThread(Runnable r) {
-            Thread t = new Thread(r, namePrefix + threadNumber.getAndIncrement());
+            Thread t =
+                    new Thread(r, namePrefix + threadNumber.getAndIncrement());
             t.setDaemon(true);
             return t;
         }
@@ -191,10 +186,16 @@ public class WorkerService {
         if (numWorkerThreads > 0) {
             if (threadsAreAssignable) {
                 for (int i = 1; i <= numWorkerThreads; ++i) {
-                    workers.add(Executors.newFixedThreadPool(1, new DaemonThreadFactory(threadNamePrefix, i)));
+                    workers.add(
+                            Executors.newFixedThreadPool(
+                                    1,
+                                    new DaemonThreadFactory(threadNamePrefix, i)));
                 }
             } else {
-                workers.add(Executors.newFixedThreadPool(numWorkerThreads, new DaemonThreadFactory(threadNamePrefix)));
+                workers.add(
+                        Executors.newFixedThreadPool(
+                                numWorkerThreads,
+                                new DaemonThreadFactory(threadNamePrefix)));
             }
         }
         stopped = false;
@@ -203,31 +204,34 @@ public class WorkerService {
     public void stop() {
         stopped = true;
 
-        // Signal for graceful shutdown
         for (ExecutorService worker : workers) {
             worker.shutdown();
         }
     }
 
     public void join(long shutdownTimeoutMS) {
-        // Give the worker threads time to finish executing
         long now = Time.currentElapsedTime();
         long endTime = now + shutdownTimeoutMS;
+
         for (ExecutorService worker : workers) {
             boolean terminated = false;
+
             while ((now = Time.currentElapsedTime()) <= endTime) {
                 try {
-                    terminated = worker.awaitTermination(endTime - now, TimeUnit.MILLISECONDS);
+                    terminated =
+                            worker.awaitTermination(
+                                    endTime - now,
+                                    TimeUnit.MILLISECONDS);
                     break;
                 } catch (InterruptedException e) {
-                    // ignore
+                    Thread.currentThread().interrupt();
+                    break;
                 }
             }
+
             if (!terminated) {
-                // If we've timed out, do a hard shutdown
                 worker.shutdownNow();
             }
         }
     }
-
 }
