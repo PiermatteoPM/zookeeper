@@ -78,7 +78,12 @@ public class WorkerService {
 
         /**
          * Must be implemented. Is called when the work request is run.
+         *
+         * <p>The generic {@code Exception} declaration is intentionally kept for
+         * compatibility with existing subclasses that already override this
+         * method with {@code throws Exception}.
          */
+        @SuppressWarnings("java:S112")
         public abstract void doWork() throws Exception;
 
         /**
@@ -151,6 +156,10 @@ public class WorkerService {
                     return;
                 }
                 workRequest.doWork();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                LOG.warn("Unexpected interruption", e);
+                workRequest.cleanup();
             } catch (Exception e) {
                 LOG.warn("Unexpected exception", e);
                 workRequest.cleanup();
@@ -220,11 +229,12 @@ public class WorkerService {
                     terminated = worker.awaitTermination(endTime - now, TimeUnit.MILLISECONDS);
                     break;
                 } catch (InterruptedException e) {
-                    // ignore
+                    Thread.currentThread().interrupt();
+                    break;
                 }
             }
             if (!terminated) {
-                // If we've timed out, do a hard shutdown
+                // If we've timed out or were interrupted, do a hard shutdown
                 worker.shutdownNow();
             }
         }
