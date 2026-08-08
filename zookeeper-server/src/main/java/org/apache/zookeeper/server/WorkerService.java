@@ -78,6 +78,11 @@ public class WorkerService {
 
         /**
          * Must be implemented. Is called when the work request is run.
+         *
+         * <p>The generic {@code throws Exception} declaration is intentionally
+         * preserved to avoid breaking source compatibility with existing
+         * WorkRequest implementations that override this method and declare
+         * {@code throws Exception}.</p>
          */
         public abstract void doWork() throws Exception;
 
@@ -220,7 +225,8 @@ public class WorkerService {
                     terminated = worker.awaitTermination(endTime - now, TimeUnit.MILLISECONDS);
                     break;
                 } catch (InterruptedException e) {
-                    // ignore
+                    Thread.currentThread().interrupt();
+                    break;
                 }
             }
             if (!terminated) {
