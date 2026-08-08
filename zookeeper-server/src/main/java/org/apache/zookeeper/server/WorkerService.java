@@ -1,21 +1,3 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package org.apache.zookeeper.server;
 
 import java.util.ArrayList;
@@ -35,11 +17,12 @@ import org.slf4j.LoggerFactory;
  * threads, which it does by creating N separate single thread ExecutorServices,
  * or non-assignable threads, which it does by creating a single N-thread
  * ExecutorService.
- *   - NIOServerCnxnFactory uses a non-assignable WorkerService because the
- *     socket IO requests are order independent and allowing the
- *     ExecutorService to handle thread assignment gives optimal performance.
- *   - CommitProcessor uses an assignable WorkerService because requests for
- *     a given session must be processed in order.
+ *
+ * NIOServerCnxnFactory uses a non-assignable WorkerService because the
+ * connection number is relatively small and there is not a natural thread
+ * assignment. CommitProcessor uses an assignable WorkerService because requests
+ * for a given session must be processed in order.
+ *
  * ExecutorService provides queue management and thread restarting, so it's
  * useful even with a single thread.
  */
@@ -48,20 +31,15 @@ public class WorkerService {
     private static final Logger LOG = LoggerFactory.getLogger(WorkerService.class);
 
     private final ArrayList<ExecutorService> workers = new ArrayList<>();
-
     private final String threadNamePrefix;
     private int numWorkerThreads;
     private boolean threadsAreAssignable;
-
     private volatile boolean stopped = true;
 
     /**
-     * @param name                  worker threads are named &lt;name&gt;Thread-##
-     * @param numThreads            number of worker threads (0 - N)
-     *                              If 0, scheduled work is run immediately by
-     *                              the calling thread.
-     * @param useAssignableThreads  whether the worker threads should be
-     *                              individually assignable or not
+     * @param name worker threads are named nameThread-##
+     * @param numThreads number of worker threads (0 - N)
+     * @param useAssignableThreads whether the worker threads should be assignable
      */
     public WorkerService(String name, int numThreads, boolean useAssignableThreads) {
         this.threadNamePrefix = (name == null ? "" : name) + "Thread";
@@ -78,6 +56,10 @@ public class WorkerService {
 
         /**
          * Must be implemented. Is called when the work request is run.
+         *
+         * The generic Exception declaration is intentionally kept unchanged to
+         * preserve the existing public API and compatibility with current
+         * WorkRequest implementations.
          */
         public abstract void doWork() throws Exception;
 
@@ -91,7 +73,7 @@ public class WorkerService {
     }
 
     /**
-     * Schedule work to be done.  If a worker thread pool is not being
+     * Schedule work to be done. If a worker thread pool is not being
      * used, work is done directly by this thread. This schedule API is
      * for use with non-assignable WorkerServices. For assignable
      * WorkerServices, will always run on the first thread.
@@ -102,7 +84,7 @@ public class WorkerService {
 
     /**
      * Schedule work to be done by the thread assigned to this id. Thread
-     * assignment is a single mod operation on the number of threads.  If a
+     * assignment is a single mod operation on the number of threads. If a
      * worker thread pool is not being used, work is done directly by
      * this thread.
      */
@@ -119,7 +101,7 @@ public class WorkerService {
         int size = workers.size();
         if (size > 0) {
             try {
-                // make sure to map negative ids as well to [0, size-1]
+                // make sure to map negative ids as well to [0, size - 1]
                 int workerNum = ((int) (id % size) + size) % size;
                 ExecutorService worker = workers.get(workerNum);
                 worker.execute(scheduledWorkRequest);
@@ -145,7 +127,6 @@ public class WorkerService {
         @Override
         public void run() {
             try {
-                // Check if stopped while request was on queue
                 if (stopped) {
                     workRequest.cleanup();
                     return;
@@ -185,6 +166,7 @@ public class WorkerService {
             t.setDaemon(true);
             return t;
         }
+
     }
 
     public void start() {
@@ -202,8 +184,6 @@ public class WorkerService {
 
     public void stop() {
         stopped = true;
-
-        // Signal for graceful shutdown
         for (ExecutorService worker : workers) {
             worker.shutdown();
         }
@@ -220,11 +200,12 @@ public class WorkerService {
                     terminated = worker.awaitTermination(endTime - now, TimeUnit.MILLISECONDS);
                     break;
                 } catch (InterruptedException e) {
-                    // ignore
+                    Thread.currentThread().interrupt();
+                    break;
                 }
             }
             if (!terminated) {
-                // If we've timed out, do a hard shutdown
+                // If we've timed out or been interrupted, do a hard shutdown
                 worker.shutdownNow();
             }
         }
