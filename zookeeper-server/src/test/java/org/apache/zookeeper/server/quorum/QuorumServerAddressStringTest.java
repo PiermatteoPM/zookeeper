@@ -3,6 +3,7 @@ package org.apache.zookeeper.server.quorum;
 import org.apache.zookeeper.server.quorum.QuorumPeer.LearnerType;
 import org.apache.zookeeper.server.quorum.QuorumPeer.QuorumServer;
 import org.apache.zookeeper.server.quorum.QuorumPeerConfig.ConfigException;
+import org.apache.zookeeper.KeeperException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -271,5 +272,402 @@ class QuorumServerAddressStringTest {
         } finally {
             System.clearProperty(QuorumPeer.CONFIG_KEY_KERBEROS_CANONICALIZE_HOST_NAMES);
         }
+    }
+
+    // ============================================================================================
+    // NUOVI TEST - combinazione multidimensionale mirata (D2.c incrociato con D3/D5/D7), aggiunta
+    // dopo aver riletto initializeWithAddressString riga per riga: D2.c (multi-indirizzo) e' l'unica
+    // dimensione che trasforma la validazione da "una tantum" a un ciclo (`for (String serverAddress
+    // : serverAddresses)`), quindi e' l'unico punto del metodo dove un problema di interazione tra
+    // dimensioni puo' nascondersi - non e' stato scelto per completezza combinatoria fine a se stessa,
+    // ma perche' e' l'unico posto dove la teoria del corso ("un'interazione tra due dimensioni attiva
+    // un comportamento non raggiungibile diversamente") si applica davvero a questo costruttore.
+    // ============================================================================================
+
+    // TC-QS-24 (multi mirata) - D2.c x D7.c: canonicalizzazione con PIU' indirizzi.
+    // this.hostname e' un campo scalare (non una lista, a differenza di addr/electionAddr che sono
+    // MultipleAddresses), ma viene riassegnato a ogni iterazione del ciclo (riga 400): con 2+ indirizzi,
+    // solo l'ULTIMO sopravvive nel campo finale. Non e' documentato ne' nel report ne' nella doc
+    // ufficiale: se confermato da questo test, e' un comportamento nuovo, non ancora messo per iscritto
+    // da nessuna parte - verificalo tu stesso prima di scriverlo nel report come quinta anomalia.
+    //
+    // CORREZIONE (dopo il primo mvn test): la versione precedente usava "host1"/"host2" come hostname.
+    // Stesso rischio gia' documentato in TC-QS-06: MultipleAddresses.addAddress() inserisce in un
+    // Set<InetSocketAddress>, e InetSocketAddress.equals() confronta l'indirizzo RISOLTO (non la stringa
+    // originale) quando la risoluzione DNS riesce. Su una rete/PC dove "host1" e "host2" (nomi finti,
+    // senza punto) vengono entrambi rediretti dalla rete locale allo stesso IP - capita con alcuni
+    // router/ISP che intercettano gli hostname non risolvibili - le due voci collassano a una sola nel
+    // Set, in modo non deterministico da macchina a macchina. Con IP letterali non c'e' risoluzione DNS
+    // di mezzo: il test e' deterministico ovunque, che e' esattamente il motivo per cui e' fallito il
+    // primo mvn test (spiegato al posto di corretto in silenzio, come da criterio del progetto).
+    @Test
+    @DisplayName("TC-QS-24 (multi mirata): D2.c x D7.c - con piu' indirizzi, solo l'ULTIMO hostname canonicalizzato sopravvive nel campo scalare")
+    void tcQs24_multiAddressCanonicalizeOnlyLastSurvives() throws ConfigException {
+        System.setProperty(QuorumPeer.CONFIG_KEY_MULTI_ADDRESS_ENABLED, "true");
+        System.setProperty(QuorumPeer.CONFIG_KEY_KERBEROS_CANONICALIZE_HOST_NAMES, "true");
+        try {
+            // 10.1.1.1 canonicalizza a un nome diverso; 10.1.1.2 NON canonicalizza (canonico == originale).
+            // Se il campo hostname riflettesse "tutti" gli indirizzi useremmo una lista; riflette invece
+            // solo l'ultimo elaborato dal ciclo.
+            Function<InetSocketAddress, InetAddress> resolver = addr -> {
+                InetAddress mockAddr = mock(InetAddress.class);
+                if ("10.1.1.1".equals(addr.getHostString())) {
+                    when(mockAddr.getCanonicalHostName()).thenReturn("host1.canonical.example.org");
+                    when(mockAddr.getHostAddress()).thenReturn("10.1.1.1");
+                } else {
+                    when(mockAddr.getCanonicalHostName()).thenReturn("10.1.1.2"); // uguale all'originale -> nessun aggiornamento
+                    when(mockAddr.getHostAddress()).thenReturn("10.1.1.2");
+                }
+                return mockAddr;
+            };
+
+            QuorumServer qs = new QuorumServer(1L, "10.1.1.1:2181:2182|10.1.1.2:2181:2182", resolver);
+
+            assertEquals(2, qs.addr.getAllAddresses().size()); // entrambi gli indirizzi sono stati accettati
+            assertEquals("10.1.1.2", qs.hostname); // NON "host1.canonical.example.org": il primo viene sovrascritto dal secondo
+        } finally {
+            System.clearProperty(QuorumPeer.CONFIG_KEY_MULTI_ADDRESS_ENABLED);
+            System.clearProperty(QuorumPeer.CONFIG_KEY_KERBEROS_CANONICALIZE_HOST_NAMES);
+        }
+    }
+
+    // TC-QS-25 (multi mirata) - D2.c x D5.b: il controllo "porta server != porta election" (riga 365)
+    // e' dentro il ciclo per-indirizzo, quindi si applica a OGNI indirizzo separatamente, non una sola
+    // volta sull'intera lista. Verifica che un secondo indirizzo con porte uguali non passi inosservato
+    // solo perche' il primo indirizzo della lista era valido.
+    @Test
+    @DisplayName("TC-QS-25 (multi mirata): D2.c x D5.b - porte uguali sul SECONDO indirizzo di una lista multi-indirizzo -> ConfigException")
+    void tcQs25_multiAddressSecondAddressEqualPorts() {
+        System.setProperty(QuorumPeer.CONFIG_KEY_MULTI_ADDRESS_ENABLED, "true");
+        try {
+            assertThrows(ConfigException.class, () ->
+                    new QuorumServer(1L, "host1:2181:2182|host2:2181:2181"));
+        } finally {
+            System.clearProperty(QuorumPeer.CONFIG_KEY_MULTI_ADDRESS_ENABLED);
+        }
+    }
+
+    // TC-QS-26 (multi mirata) - D2.c x D3.a: il controllo sul numero di segmenti (righe 342-344) e'
+    // anch'esso dentro il ciclo per-indirizzo. Verifica che un secondo indirizzo malformato non venga
+    // "coperto" dal fatto che il primo indirizzo della lista era ben formato (nessun cortocircuito
+    // silenzioso sul resto della lista).
+    @Test
+    @DisplayName("TC-QS-26 (multi mirata): D2.c x D3.a - il SECONDO indirizzo di una lista multi-indirizzo ha segmenti insufficienti -> ConfigException")
+    void tcQs26_multiAddressSecondAddressTooFewSegments() {
+        System.setProperty(QuorumPeer.CONFIG_KEY_MULTI_ADDRESS_ENABLED, "true");
+        try {
+            assertThrows(ConfigException.class, () ->
+                    new QuorumServer(1L, "host1:2181:2182|host2:2181"));
+        } finally {
+            System.clearProperty(QuorumPeer.CONFIG_KEY_MULTI_ADDRESS_ENABLED);
+        }
+    }
+
+
+    // ============================================================================================
+    // NUOVI TEST - BVA completa su D4 (dimensione porta), aggiunta dopo la revisione dei 31 punti:
+    // mancavano il minimo (0), il massimo (65535) e il caso appena sotto il minimo (negativo) del
+    // range TCP - la BVA su D4 aveva finora solo il lato "sopra il massimo" (TC-QS-11, porta 70000).
+    // InetSocketAddress(host, port) accetta 0-65535 inclusi (Javadoc JDK): 0 e 65535 sono quindi
+    // gli estremi VALIDI del range, un valore negativo segue lo stesso percorso non gestito di
+    // TC-QS-11. Nessuno dei tre tocca D5 in modo significativo: si usa sempre una election port
+    // diversa (2182) per isolare la sola dimensione D4. MAI eseguiti: da confermare con mvn test
+    // in locale prima di promuoverli in Tabella 2.
+    // ============================================================================================
+
+    // TC-QS-27 - D4.a, boundary minimo: porta 0 (valore limite valido secondo il codice)
+    @Test
+    @DisplayName("TC-QS-27 (BVA D4, minimo): porta 0 -> costruzione OK (limite valido del range TCP)")
+    void tcQs27_portZeroIsValidBoundary() {
+        assertDoesNotThrow(() -> new QuorumServer(1L, "host1:0:2182"));
+    }
+
+    // TC-QS-28 - D4.a, boundary massimo: porta 65535 (valore limite valido secondo il codice)
+    @Test
+    @DisplayName("TC-QS-28 (BVA D4, massimo): porta 65535 -> costruzione OK (limite valido del range TCP)")
+    void tcQs28_portMaxValueIsValidBoundary() {
+        assertDoesNotThrow(() -> new QuorumServer(1L, "host1:65535:2182"));
+    }
+
+    // TC-QS-29 - D4.c, boundary appena sotto il minimo: porta negativa, stesso percorso non gestito
+    // di TC-QS-11 (parsabile come intero, ma IllegalArgumentException non incapsulata in ConfigException).
+    @Test
+    @DisplayName("TC-QS-29 (BVA D4, sotto il minimo): porta -1 -> IllegalArgumentException NON gestita, come TC-QS-11")
+    void tcQs29_negativePortIsUnhandled() {
+        assertThrows(IllegalArgumentException.class, () -> new QuorumServer(1L, "host1:-1:2182"));
+    }
+
+
+    // ============================================================================================
+    // ESTENSIONE QuorumServer (dopo la critica dei 31 punti): oltre al costruttore, anche
+    // checkAddressDuplicate, equals, toString - gli unici altri metodi della classe con logica
+    // vera (verificato leggendo l'intera classe sul sorgente reale apache/zookeeper). hashCode()
+    // e' rotto di proposito (assert false; return 42;) - documentato ma non testabile nel senso
+    // classico. recreateSocketAddresses() e delimitedHostString() restano fuori scope (banali o
+    // gia' esercitati indirettamente).
+    //
+    // NESSUNA DOCUMENTAZIONE UFFICIALE per questi 3 metodi: verificato sul Javadoc pubblico di
+    // ZooKeeper su tutte le versioni (3.5.5 -> 3.9.5 -> current), mai comparsa una descrizione
+    // testuale, solo firma e throws. A differenza del costruttore (Administrator's Guide), qui
+    // non c'e' nessuna Fase 1 da documentazione: e' white-box/grey-box fin dall'inizio.
+    //
+    // 2 promozioni confermate da Randoop (output gia' esistente sull'intera classe, mai
+    // esaminato con questo obiettivo prima d'ora - vedi RegressionTest0.java sul fork,
+    // test002/test007 e test008/test022):
+    //   - checkAddressDuplicate(null) -> NullPointerException (CD0)
+    //   - toString() con LearnerType passato esplicitamente null -> stringa vuota, nessun
+    //     suffisso di tipo (TS2, terza classe mai considerata)
+    // ============================================================================================
+
+    // ---- checkAddressDuplicate(QuorumServer s) ----
+
+    // TC-QS-30 - CD0.a: s null -> NullPointerException. CONFERMATO da Randoop (RegressionTest0,
+    // test002 e test007): "Cannot read field \"addr\" because \"s\" is null". Nessun controllo
+    // esplicito su s nel metodo.
+    @Test
+    @DisplayName("TC-QS-30 (CD0.a, confermato da Randoop): checkAddressDuplicate(null) -> NullPointerException")
+    void tcQs30_checkAddressDuplicateNullArgument() throws ConfigException {
+        QuorumServer qs = new QuorumServer(1L, "10.0.0.1:2181:2182");
+        assertThrows(NullPointerException.class, () -> qs.checkAddressDuplicate(null));
+    }
+
+    // TC-QS-31 - CD1.a: nessuna sovrapposizione -> nessuna eccezione (baseline).
+    @Test
+    @DisplayName("TC-QS-31 (CD1.a): indirizzi disgiunti -> nessuna eccezione")
+    void tcQs31_checkAddressDuplicateNoOverlap() throws ConfigException {
+        QuorumServer qs1 = new QuorumServer(1L, "10.0.0.1:2181:2182");
+        QuorumServer qs2 = new QuorumServer(2L, "10.0.0.2:2181:2182");
+        assertDoesNotThrow(() -> qs1.checkAddressDuplicate(qs2));
+    }
+
+    // TC-QS-32 - CD1.b x CD2.a: indirizzo server NORMALE condiviso (stesso host:port) -> conflitto
+    // reale, BadArgumentsException.
+    @Test
+    @DisplayName("TC-QS-32 (CD1.b x CD2.a): indirizzo server normale condiviso -> BadArgumentsException")
+    void tcQs32_checkAddressDuplicateRealConflict() throws ConfigException {
+        QuorumServer qs1 = new QuorumServer(1L, "10.0.0.1:2181:2182");
+        QuorumServer qs2 = new QuorumServer(2L, "10.0.0.1:2181:2183"); // stesso server port, election diversa
+        assertThrows(KeeperException.BadArgumentsException.class, () -> qs1.checkAddressDuplicate(qs2));
+    }
+
+    // TC-QS-33 - CD1.b x CD2.b: l'UNICO indirizzo condiviso e' loopback -> escluso da
+    // excludedSpecialAddresses su entrambi i lati, nessuna eccezione nonostante la sovrapposizione
+    // nominale.
+    @Test
+    @DisplayName("TC-QS-33 (CD1.b x CD2.b): indirizzo condiviso e' loopback -> nessuna eccezione (escluso)")
+    void tcQs33_checkAddressDuplicateSpecialAddressExcluded() throws ConfigException {
+        QuorumServer qs1 = new QuorumServer(1L, "127.0.0.1:2181:2182");
+        QuorumServer qs2 = new QuorumServer(2L, "127.0.0.1:2181:2183");
+        assertDoesNotThrow(() -> qs1.checkAddressDuplicate(qs2));
+    }
+
+    // TC-QS-47 - CD3.b x CD4.c: il conflitto avviene SOLO tramite il clientAddr di s (non addr,
+    // non electionAddr) - chiude la classe CD3.b, mai testata dai TC-QS-30..33 (nessuno di quei
+    // 4 test costruiva un s con client-config).
+    @Test
+    @DisplayName("TC-QS-47 (CD3.b x CD4.c): conflitto solo tramite clientAddr di s -> BadArgumentsException")
+    void tcQs47_checkAddressDuplicateConflictViaClientAddr() throws ConfigException {
+        QuorumServer qs1 = new QuorumServer(1L, "10.0.0.5:2181:2182");
+        // il clientAddr di qs2 coincide esattamente con l'indirizzo server di qs1
+        QuorumServer qs2 = new QuorumServer(2L, new InetSocketAddress("10.0.0.9", 3000),
+                new InetSocketAddress("10.0.0.9", 3001), new InetSocketAddress("10.0.0.5", 2181), LearnerType.PARTICIPANT);
+        assertThrows(KeeperException.BadArgumentsException.class, () -> qs1.checkAddressDuplicate(qs2));
+    }
+
+    // TC-QS-48 - CD4.b: il conflitto avviene tramite electionAddr di s, non addr - chiude l'ultima
+    // classe di CD4 mai testata (TC-QS-32 copriva solo CD4.a/addr).
+    @Test
+    @DisplayName("TC-QS-48 (CD4.b): conflitto solo tramite electionAddr di s -> BadArgumentsException")
+    void tcQs48_checkAddressDuplicateConflictViaElectionAddr() throws ConfigException {
+        QuorumServer qs1 = new QuorumServer(1L, "10.0.0.6:2181:2182");
+        // l'electionAddr di qs2 coincide esattamente con l'electionAddr di qs1
+        QuorumServer qs2 = new QuorumServer(2L, new InetSocketAddress("10.0.0.9", 3000),
+                new InetSocketAddress("10.0.0.6", 2182), null, LearnerType.PARTICIPANT);
+        assertThrows(KeeperException.BadArgumentsException.class, () -> qs1.checkAddressDuplicate(qs2));
+    }
+
+    // ---- equals(Object o) ----
+
+    // TC-QS-34 - EQ1.a: argomento non e' un QuorumServer. CONFERMATO da Randoop (RegressionTest0,
+    // test051: equals((Object) ":participant") -> false).
+    @Test
+    @DisplayName("TC-QS-34 (EQ1.a, confermato da Randoop): argomento non-QuorumServer -> false")
+    void tcQs34_equalsWrongType() {
+        QuorumServer qs = new QuorumServer(1L, new InetSocketAddress("10.0.0.1", 2181),
+                new InetSocketAddress("10.0.0.1", 2182), null, LearnerType.PARTICIPANT);
+        assertFalse(qs.equals("non sono un QuorumServer"));
+    }
+
+    // TC-QS-35 - EQ2: id diverso, tutto il resto uguale.
+    @Test
+    @DisplayName("TC-QS-35 (EQ2): id diverso -> false")
+    void tcQs35_equalsDifferentId() {
+        InetSocketAddress addr = new InetSocketAddress("10.0.0.1", 2181);
+        InetSocketAddress election = new InetSocketAddress("10.0.0.1", 2182);
+        QuorumServer a = new QuorumServer(1L, addr, election, null, LearnerType.PARTICIPANT);
+        QuorumServer b = new QuorumServer(2L, addr, election, null, LearnerType.PARTICIPANT);
+        assertFalse(a.equals(b));
+    }
+
+    // TC-QS-36 - EQ3: type diverso, id uguale (serve id uguale per arrivare a valutare type).
+    @Test
+    @DisplayName("TC-QS-36 (EQ3): type diverso, id uguale -> false")
+    void tcQs36_equalsDifferentType() {
+        InetSocketAddress addr = new InetSocketAddress("10.0.0.1", 2181);
+        InetSocketAddress election = new InetSocketAddress("10.0.0.1", 2182);
+        QuorumServer a = new QuorumServer(1L, addr, election, null, LearnerType.PARTICIPANT);
+        QuorumServer b = new QuorumServer(1L, addr, election, null, LearnerType.OBSERVER);
+        assertFalse(a.equals(b));
+    }
+
+    // TC-QS-37 - EQ4: addr diverso, id/type uguali (vincolo di cortocircuito: EQ2 ed EQ3 devono
+    // essere "uguale" perche' il metodo arrivi a valutare addr).
+    @Test
+    @DisplayName("TC-QS-37 (EQ4): addr diverso, id/type uguali -> false")
+    void tcQs37_equalsDifferentAddr() {
+        InetSocketAddress election = new InetSocketAddress("10.0.0.1", 2182);
+        QuorumServer a = new QuorumServer(1L, new InetSocketAddress("10.0.0.1", 2181), election, null, LearnerType.PARTICIPANT);
+        QuorumServer b = new QuorumServer(1L, new InetSocketAddress("10.0.0.2", 2181), election, null, LearnerType.PARTICIPANT);
+        assertFalse(a.equals(b));
+    }
+
+    // TC-QS-38 - EQ5: electionAddr diverso, tutto il resto precedente uguale.
+    @Test
+    @DisplayName("TC-QS-38 (EQ5): electionAddr diverso -> false")
+    void tcQs38_equalsDifferentElectionAddr() {
+        InetSocketAddress addr = new InetSocketAddress("10.0.0.1", 2181);
+        QuorumServer a = new QuorumServer(1L, addr, new InetSocketAddress("10.0.0.1", 2182), null, LearnerType.PARTICIPANT);
+        QuorumServer b = new QuorumServer(1L, addr, new InetSocketAddress("10.0.0.1", 2183), null, LearnerType.PARTICIPANT);
+        assertFalse(a.equals(b));
+    }
+
+    // TC-QS-39 - EQ6/EQ7: clientAddr asimmetrico (uno null, l'altro no) - checkAddressesEqual deve
+    // gestire il caso senza NPE e restituire false.
+    @Test
+    @DisplayName("TC-QS-39 (EQ6/EQ7): clientAddr null su un lato, presente sull'altro -> false")
+    void tcQs39_equalsAsymmetricClientAddr() {
+        InetSocketAddress addr = new InetSocketAddress("10.0.0.1", 2181);
+        InetSocketAddress election = new InetSocketAddress("10.0.0.1", 2182);
+        QuorumServer a = new QuorumServer(1L, addr, election, null, LearnerType.PARTICIPANT);
+        QuorumServer b = new QuorumServer(1L, addr, election, new InetSocketAddress("10.0.0.1", 3000), LearnerType.PARTICIPANT);
+        assertFalse(a.equals(b));
+    }
+
+    // TC-QS-40 - baseline positiva: tutti i campi rilevanti uguali -> true. Mai testata
+    // esplicitamente finora (Randoop non genera coppie di oggetti davvero uguali per caso).
+    @Test
+    @DisplayName("TC-QS-40 (baseline positiva): tutti i campi uguali -> true")
+    void tcQs40_equalsFullyEqual() {
+        InetSocketAddress addr = new InetSocketAddress("10.0.0.1", 2181);
+        InetSocketAddress election = new InetSocketAddress("10.0.0.1", 2182);
+        QuorumServer a = new QuorumServer(1L, addr, election, null, LearnerType.PARTICIPANT);
+        QuorumServer b = new QuorumServer(1L, addr, election, null, LearnerType.PARTICIPANT);
+        assertTrue(a.equals(b));
+    }
+
+    // ---- toString() ----
+
+    // TC-QS-41 - TS1(vuoto) x TS2(participant, default) x TS3.b(client null).
+    // CONFERMATO da Randoop (RegressionTest0, test007/test010/test026/ecc.): risultato ":participant".
+    @Test
+    @DisplayName("TC-QS-41 (baseline, confermato da Randoop): nessun indirizzo, type default -> \":participant\"")
+    void tcQs41_toStringDefaultEmpty() {
+        QuorumServer qs = new QuorumServer(1L, (InetSocketAddress) null, (InetSocketAddress) null, (InetSocketAddress) null);
+        assertEquals(":participant", qs.toString());
+    }
+
+    // TC-QS-42 - TS2, terza classe: LearnerType passato esplicitamente null -> stringa vuota,
+    // nessun suffisso di tipo. CONFERMATO da Randoop (RegressionTest0, test008/test022) - ANOMALIA,
+    // mai documentata: un QuorumServer con type nullo produce un toString() senza ":observer" ne'
+    // ":participant", indistinguibile da un oggetto "vuoto" costruito diversamente.
+    @Test
+    @DisplayName("TC-QS-42 (TS2 terza classe, confermato da Randoop - ANOMALIA): type null -> stringa vuota")
+    void tcQs42_toStringNullType() {
+        QuorumServer qs = new QuorumServer(1L, null, null, null, null); // learnerType esplicitamente null
+        assertEquals("", qs.toString());
+    }
+
+    // TC-QS-43 - TS1, liste indirizzi popolate: verifica il formato host:port:port.
+    @Test
+    @DisplayName("TC-QS-43 (TS1): indirizzi popolati -> formato host:port:port:type")
+    void tcQs43_toStringWithAddresses() throws ConfigException {
+        QuorumServer qs = new QuorumServer(1L, "10.0.0.1:2181:2182");
+        assertEquals("10.0.0.1:2181:2182:participant", qs.toString());
+    }
+
+    // TC-QS-44 - TS3.c: clientAddr presente ma isClientAddrFromStatic=true -> comunque non scritto
+    // (stesso output di TS3.b/null, meccanismo diverso - stessa distinzione gia' fatta per D7.a/D7.c).
+    @Test
+    @DisplayName("TC-QS-44 (TS3.c): clientAddr presente ma isClientAddrFromStatic=true -> non scritto")
+    void tcQs44_toStringClientAddrFromStaticExcluded() {
+        QuorumServer qs = new QuorumServer(1L, (InetSocketAddress) null, (InetSocketAddress) null, (InetSocketAddress) null);
+        qs.clientAddr = new InetSocketAddress("10.0.0.1", 3000);
+        qs.isClientAddrFromStatic = true;
+        assertEquals(":participant", qs.toString());
+    }
+
+    // TC-QS-45 - TS3.a: clientAddr presente e non da fonte statica -> scritto con un solo ";" davanti.
+    // NOTA DI CORREZIONE: la versione reale di QuorumServer su questo fork (verificata sul sorgente,
+    // release-3.9.5) non ha il campo secureClientAddr - e' stato aggiunto solo in versioni successive
+    // di ZooKeeper. La dimensione TS4/combinazione TS3xTS4 ipotizzata in una bozza precedente non
+    // esiste su questo codice: rimossa, non un'esclusione per scelta ma un dato di fatto verificato.
+    @Test
+    @DisplayName("TC-QS-45 (TS3.a): clientAddr presente -> \";host:port\"")
+    void tcQs45_toStringWithClientAddr() {
+        QuorumServer qs = new QuorumServer(1L, (InetSocketAddress) null, (InetSocketAddress) null, (InetSocketAddress) null);
+        qs.clientAddr = new InetSocketAddress("10.0.0.1", 3000);
+        assertEquals(":participant;10.0.0.1:3000", qs.toString());
+    }
+
+    // TC-QS-49 - TS1.b: indirizzi MULTIPLI (non piu' un singolo indirizzo come TC-QS-43). Promosso da
+    // un test del prompt LLM P1 (Fase 4, contesto pieno): toString() ordina addr ed electionAddr in
+    // modo INDIPENDENTE per hostname, poi li accoppia per indice - un test a un solo indirizzo non
+    // esercita mai questo riordinamento. Input volutamente in ordine decrescente (.170 prima di .160)
+    // per dimostrare che il riordinamento avviene davvero, non per coincidenza dell'ordine di inserimento.
+    @Test
+    @DisplayName("TC-QS-49 (TS1.b, promosso da LLM P1): indirizzi multipli -> ordinati per host e accoppiati per indice")
+    void tcQs49_toStringMultipleAddressesSortedAndPaired() throws ConfigException {
+        System.setProperty(QuorumPeer.CONFIG_KEY_MULTI_ADDRESS_ENABLED, "true");
+        QuorumServer qs = new QuorumServer(1L, "192.0.2.170:2888:3888|192.0.2.160:2889:3889");
+        assertEquals("192.0.2.160:2889:3889|192.0.2.170:2888:3888:participant", qs.toString());
+    }
+
+    // TC-QS-50 - CD2.c: indirizzo NON RISOLVIBILE (hostname inesistente) - escluso dal confronto tramite
+    // lo stesso ramo di excludedSpecialAddresses (inetaddr == null), non tramite isAnyLocalAddress/
+    // isLoopbackAddress come CD2.b. Promosso da 2 prompt LLM indipendenti (P9 e P10, Fase 4) - stessa
+    // scoperta trovata due volte separatamente, buon segnale di robustezza.
+    @Test
+    @DisplayName("TC-QS-50 (CD2.c, promosso da LLM P9+P10): indirizzo non risolvibile -> escluso, nessuna eccezione")
+    void tcQs50_checkAddressDuplicateIgnoresUnresolvedAddress() {
+        InetSocketAddress unresolved = InetSocketAddress.createUnresolved("host.invalid.test", 2181);
+        QuorumServer qs1 = new QuorumServer(1L, unresolved, new InetSocketAddress("10.0.0.1", 2182), null, LearnerType.PARTICIPANT);
+        QuorumServer qs2 = new QuorumServer(2L, unresolved, new InetSocketAddress("10.0.0.2", 2182), null, LearnerType.PARTICIPANT);
+        assertDoesNotThrow(() -> qs1.checkAddressDuplicate(qs2));
+    }
+
+    // TC-QS-51 - conferma empirica della dichiarazione "TS3 e' indipendente" (vedi Combinazione sopra):
+    // anche con TS2.c (type null, l'anomalia), il client address viene comunque scritto correttamente.
+    // Promosso da LLM P8 (Fase 4) - rafforza con un test una dichiarazione finora solo affermata in prosa.
+    @Test
+    @DisplayName("TC-QS-51 (conferma Combinazione, promosso da LLM P8): type null + clientAddr presente -> solo il client viene scritto")
+    void tcQs51_toStringNullTypeWithClientAddressStillAppendsClient() {
+        QuorumServer qs = new QuorumServer(1L, null, null, new InetSocketAddress("10.0.0.5", 2181), null);
+        assertEquals(";10.0.0.5:2181", qs.toString());
+    }
+
+    // ---- hashCode() -- anomalia, non un test in senso classico ----
+
+    // TC-QS-46 - hashCode() contiene "assert false; return 42;". CONFERMATO SPERIMENTALMENTE (non piu'
+    // un'ipotesi): le assertion Java sono attive in questo ambiente Maven - lo dimostra il prompt P3
+    // (LLM, contesto ridotto, Fase 4) che ha assunto il contratto standard equals/hashCode e ha
+    // ottenuto AssertionError chiamando hashCode() dopo un equals() vero - terza conferma indipendente
+    // dell'anomalia, dopo la lettura del codice e il ragionamento originale.
+    @Test
+    @DisplayName("TC-QS-46 (anomalia, confermata anche dall'LLM P3): hashCode() -> AssertionError (assertion attive)")
+    void tcQs46_hashCodeThrowsAssertionError() {
+        QuorumServer qs = new QuorumServer(1L, new InetSocketAddress("10.0.0.1", 2181),
+                new InetSocketAddress("10.0.0.1", 2182), null, LearnerType.PARTICIPANT);
+        AssertionError e = assertThrows(AssertionError.class, qs::hashCode);
+        assertEquals("hashCode not designed", e.getMessage());
     }
 }
