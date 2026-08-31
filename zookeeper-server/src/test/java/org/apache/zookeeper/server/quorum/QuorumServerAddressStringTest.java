@@ -553,6 +553,46 @@ class QuorumServerAddressStringTest {
         assertFalse(a.equals(b));
     }
 
+    // TC-QS-52 - EQ6, direzione mancante di TC-QS-39: "il mio clientAddr e' valorizzato, l'altro no"
+    // (l'opposto di TC-QS-39). Utile di per se', ma NON chiude il branch mancante di checkAddressesEqual
+    // (92%): in entrambe le direzioni asimmetriche l'espressione va in cortocircuito prima di arrivare
+    // al confronto vero — vedi TC-QS-53/54 per la chiusura reale, trovata dopo un secondo giro di JaCoCo.
+    @Test
+    @DisplayName("TC-QS-52 (EQ6): clientAddr presente su this, assente sull'altro -> false")
+    void tcQs52_equalsAsymmetricClientAddressOtherDirection() {
+        InetSocketAddress addr = new InetSocketAddress("10.0.0.1", 2181);
+        InetSocketAddress election = new InetSocketAddress("10.0.0.1", 2182);
+        QuorumServer a = new QuorumServer(1L, addr, election, new InetSocketAddress("10.0.0.1", 3000), LearnerType.PARTICIPANT);
+        QuorumServer b = new QuorumServer(1L, addr, election, null, LearnerType.PARTICIPANT);
+        assertFalse(a.equals(b));
+    }
+
+    // TC-QS-53/54 - EQ6, la chiusura reale del branch mancante (92%->100%, secondo giro di JaCoCo):
+    // il confronto vero (addr1.equals(addr2) dentro checkAddressesEqual) non era MAI stato raggiunto -
+    // in tutti i test precedenti (39, 40, 52) l'espressione andava in cortocircuito prima. Serve un caso
+    // con ENTRAMBI i clientAddr non-null: TC-QS-53 diversi (chiude anche il confronto ==false),
+    // TC-QS-54 uguali (chiude il confronto ==true, mai visto neppure nel baseline TC-QS-40 che usa
+    // entrambi null, non entrambi valorizzati).
+    @Test
+    @DisplayName("TC-QS-53 (EQ6, chiusura JaCoCo): entrambi i clientAddr non-null ma diversi -> false")
+    void tcQs53_equalsBothClientAddressesNonNullDiffer() {
+        InetSocketAddress addr = new InetSocketAddress("10.0.0.1", 2181);
+        InetSocketAddress election = new InetSocketAddress("10.0.0.1", 2182);
+        QuorumServer a = new QuorumServer(1L, addr, election, new InetSocketAddress("10.0.0.9", 3000), LearnerType.PARTICIPANT);
+        QuorumServer b = new QuorumServer(1L, addr, election, new InetSocketAddress("10.0.0.8", 3001), LearnerType.PARTICIPANT);
+        assertFalse(a.equals(b));
+    }
+
+    @Test
+    @DisplayName("TC-QS-54 (EQ6, chiusura JaCoCo): entrambi i clientAddr non-null e uguali -> true")
+    void tcQs54_equalsBothClientAddressesNonNullEqual() {
+        InetSocketAddress addr = new InetSocketAddress("10.0.0.1", 2181);
+        InetSocketAddress election = new InetSocketAddress("10.0.0.1", 2182);
+        QuorumServer a = new QuorumServer(1L, addr, election, new InetSocketAddress("10.0.0.9", 3000), LearnerType.PARTICIPANT);
+        QuorumServer b = new QuorumServer(1L, addr, election, new InetSocketAddress("10.0.0.9", 3000), LearnerType.PARTICIPANT);
+        assertTrue(a.equals(b));
+    }
+
     // TC-QS-40 - baseline positiva: tutti i campi rilevanti uguali -> true. Mai testata
     // esplicitamente finora (Randoop non genera coppie di oggetti davvero uguali per caso).
     @Test
