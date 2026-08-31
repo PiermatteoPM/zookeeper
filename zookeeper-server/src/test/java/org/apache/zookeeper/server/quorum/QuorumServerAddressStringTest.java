@@ -697,17 +697,21 @@ class QuorumServerAddressStringTest {
 
     // ---- hashCode() -- anomalia, non un test in senso classico ----
 
-    // TC-QS-46 - hashCode() contiene "assert false; return 42;". CONFERMATO SPERIMENTALMENTE (non piu'
-    // un'ipotesi): le assertion Java sono attive in questo ambiente Maven - lo dimostra il prompt P3
-    // (LLM, contesto ridotto, Fase 4) che ha assunto il contratto standard equals/hashCode e ha
-    // ottenuto AssertionError chiamando hashCode() dopo un equals() vero - terza conferma indipendente
-    // dell'anomalia, dopo la lettura del codice e il ragionamento originale.
+    // TC-QS-46 - hashCode() contiene "assert false; return 42;". Le assertion Java sono confermate
+    // attive sotto Surefire (mvn test: AssertionError reale, anche confermato indipendentemente
+    // dall'LLM P3, Fase 4) MA NON sotto PIT: PIT esegue i test in un processo JVM separato che non
+    // eredita automaticamente il flag -ea di Surefire, quindi li' l'assert diventa un no-op e il
+    // metodo restituisce 42. Test scritto per reggere in entrambi i casi - la correttezza del test
+    // non deve dipendere da quale strumento Maven lo esegue.
     @Test
-    @DisplayName("TC-QS-46 (anomalia, confermata anche dall'LLM P3): hashCode() -> AssertionError (assertion attive)")
-    void tcQs46_hashCodeThrowsAssertionError() {
+    @DisplayName("TC-QS-46 (anomalia): hashCode() -> 42, oppure AssertionError se le assertion sono attive")
+    void tcQs46_hashCodeConstantOrAssertionError() {
         QuorumServer qs = new QuorumServer(1L, new InetSocketAddress("10.0.0.1", 2181),
                 new InetSocketAddress("10.0.0.1", 2182), null, LearnerType.PARTICIPANT);
-        AssertionError e = assertThrows(AssertionError.class, qs::hashCode);
-        assertEquals("hashCode not designed", e.getMessage());
+        try {
+            assertEquals(42, qs.hashCode());
+        } catch (AssertionError e) {
+            assertEquals("hashCode not designed", e.getMessage());
+        }
     }
 }
