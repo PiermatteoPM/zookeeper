@@ -567,12 +567,15 @@ class QuorumServerAddressStringTest {
         assertFalse(a.equals(b));
     }
 
-    // TC-QS-53/54 - EQ6, la chiusura reale del branch mancante (92%->100%, secondo giro di JaCoCo):
-    // il confronto vero (addr1.equals(addr2) dentro checkAddressesEqual) non era MAI stato raggiunto -
-    // in tutti i test precedenti (39, 40, 52) l'espressione andava in cortocircuito prima. Serve un caso
-    // con ENTRAMBI i clientAddr non-null: TC-QS-53 diversi (chiude anche il confronto ==false),
-    // TC-QS-54 uguali (chiude il confronto ==true, mai visto neppure nel baseline TC-QS-40 che usa
-    // entrambi null, non entrambi valorizzati).
+    // TC-QS-53/54 - EQ6: chiudono il confronto vero (addr1.equals(addr2)) dentro checkAddressesEqual,
+    // mai raggiunto da nessun test precedente (39, 40, 52 vanno tutti in corto circuito prima). Il
+    // 92%->98% e' pero' il tetto massimo raggiungibile, non un errore residuo: il branch ancora
+    // segnalato mancante da JaCoCo (term1&&term2 riga 467) e' CODICE MORTO dimostrabile - term1&&term2
+    // garantiscono che si arrivi a term3 solo con addr1/addr2 della stessa nullita' (entrambi null o
+    // entrambi non-null); nel ramo "entrambi non-null", il controllo "addr2==null" dentro term3 puo'
+    // quindi valere SOLO falso, mai vero, per costruzione - nessun test puo' soddisfarlo. Stessa natura
+    // del "return 42" mai eseguito in hashCode(): un secondo caso di codice morto trovato in questa
+    // classe, non un buco di suite.
     @Test
     @DisplayName("TC-QS-53 (EQ6, chiusura JaCoCo): entrambi i clientAddr non-null ma diversi -> false")
     void tcQs53_equalsBothClientAddressesNonNullDiffer() {
@@ -693,6 +696,63 @@ class QuorumServerAddressStringTest {
     void tcQs51_toStringNullTypeWithClientAddressStillAppendsClient() {
         QuorumServer qs = new QuorumServer(1L, null, null, new InetSocketAddress("10.0.0.5", 2181), null);
         assertEquals(";10.0.0.5:2181", qs.toString());
+    }
+
+    // TC-QS-55 - D6.b: valore esplicito ":participant" come 4o segmento della stringa - D6.b era finora
+    // raggiunto solo implicitamente (nessun segmento = default), mai attraverso il ramo che chiama
+    // getType("participant"). Utile per la Category Partition (chiude la classe D6.b esplicita), ma NON
+    // chiude il mutante PIT sulla riga "return LearnerType.PARTICIPANT;": verificato che e' un mutante
+    // equivalente, non un buco di test - se getType("participant") restituisse null, il costruttore
+    // lascerebbe "type" al suo valore di default del campo (gia' PARTICIPANT), mascherando la mutazione
+    // in modo osservabilmente identico. Nessun test puo' distinguerlo.
+    @Test
+    @DisplayName("TC-QS-55 (D6.b): tipo esplicito \":participant\" nella stringa -> PARTICIPANT")
+    void tcQs55_getTypeExplicitParticipant() throws ConfigException {
+        QuorumServer qs = new QuorumServer(1L, "host1:2181:2182:participant");
+        assertEquals("host1:2181:2182:participant", qs.toString());
+    }
+
+    // TC-QS-56 - delimitedHostString, indirizzo IPv6: mai testato nella suite manuale (solo un prompt
+    // LLM lo aveva esplorato, in un file separato non promosso). Chiude davvero il mutante PIT sul
+    // wrapping "[" + host + "]" (confermato KILLED dopo il rilancio).
+    @Test
+    @DisplayName("TC-QS-56 (chiusura PIT confermata): indirizzo IPv6 in toString() -> host tra parentesi quadre")
+    void tcQs56_toStringWrapsIpv6HostInBrackets() {
+        QuorumServer qs = new QuorumServer(1L,
+                InetSocketAddress.createUnresolved("2001:db8::1", 2181),
+                InetSocketAddress.createUnresolved("2001:db8::1", 2182),
+                null, LearnerType.PARTICIPANT);
+        assertEquals("[2001:db8::1]:2181:2182:participant", qs.toString());
+    }
+
+    // TC-QS-57 - TS1, caso asimmetrico: una lista popolata, l'altra vuota. Scartato in precedenza come
+    // "non nuovo" quando l'aveva proposto un prompt LLM (stesso ramo di TS1.a) - corretto sulla classe di
+    // equivalenza e utile per la Category Partition, ma NON ha chiuso il mutante PIT sulla riga 437
+    // (probabile mutazione di boundary su uno dei due confronti ">0", non sull'intero "&&" - non
+    // identificata con certezza). Dichiarato residuo aperto, non inseguito oltre un secondo tentativo.
+    @Test
+    @DisplayName("TC-QS-57 (TS1): solo addr popolato, electionAddr vuoto -> stesso esito di entrambi vuoti")
+    void tcQs57_toStringOnlyAddrPopulatedElectionEmpty() {
+        QuorumServer qs = new QuorumServer(1L, new InetSocketAddress("10.0.0.1", 2181));
+        assertEquals(":participant", qs.toString());
+    }
+
+    // TC-QS-58 - stesso obiettivo di TC-QS-49 (mutante "removed call to List::sort" su
+    // electionAddrList, riga 439) ma con 3 indirizzi invece di 2 e valori di porta molto piu'
+    // distanti, per massimizzare la possibilita' di discriminare la mancata risoluzione. La
+    // riproduzione a mano dell'effetto della mutazione su TC-QS-49 suggeriva che dovesse gia'
+    // uccidere questo mutante (le porte si scambierebbero tra le entry) - non e' cosi' secondo
+    // PIT, e la causa esatta non e' stata isolata con certezza. Aggiunto come secondo tentativo
+    // indipendente; DA VERIFICARE empiricamente con un nuovo giro di PIT, non dichiarato chiuso.
+    @Test
+    @DisplayName("TC-QS-58 (tentativo aggiuntivo, da verificare con PIT): 3 indirizzi, ordinamento e accoppiamento election")
+    void tcQs58_toStringThreeAddressesSortedAndPaired() throws ConfigException {
+        System.setProperty(QuorumPeer.CONFIG_KEY_MULTI_ADDRESS_ENABLED, "true");
+        QuorumServer qs = new QuorumServer(1L,
+                "192.0.2.170:2888:9001|192.0.2.130:2887:9002|192.0.2.199:2889:9003");
+        assertEquals(
+                "192.0.2.130:2887:9002|192.0.2.170:2888:9001|192.0.2.199:2889:9003:participant",
+                qs.toString());
     }
 
     // ---- hashCode() -- anomalia, non un test in senso classico ----
