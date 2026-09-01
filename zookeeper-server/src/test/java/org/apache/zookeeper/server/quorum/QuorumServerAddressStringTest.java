@@ -739,13 +739,16 @@ class QuorumServerAddressStringTest {
 
     // TC-QS-58 - stesso obiettivo di TC-QS-49 (mutante "removed call to List::sort" su
     // electionAddrList, riga 439) ma con 3 indirizzi invece di 2 e valori di porta molto piu'
-    // distanti, per massimizzare la possibilita' di discriminare la mancata risoluzione. La
-    // riproduzione a mano dell'effetto della mutazione su TC-QS-49 suggeriva che dovesse gia'
-    // uccidere questo mutante (le porte si scambierebbero tra le entry) - non e' cosi' secondo
-    // PIT, e la causa esatta non e' stata isolata con certezza. Aggiunto come secondo tentativo
-    // indipendente; DA VERIFICARE empiricamente con un nuovo giro di PIT, non dichiarato chiuso.
+    // distanti, per massimizzare la possibilita' di discriminare la mancata risoluzione.
+    // CONFERMATO: dopo il rilancio di PIT, la riga 439 e' KILLED. Resta un solo mutante
+    // sopravvissuto sull'intera classe (riga 437, "changed conditional boundary" su
+    // addrList.size() > 0) - e anche quello e' un mutante equivalente dimostrato: il ciclo che
+    // segue e' IntStream.range(0, addrList.size()), quindi ogni volta che addrList.size()==0 il
+    // corpo ha zero iterazioni indipendentemente dal fatto che il blocco if venga eseguito o
+    // saltato - nessuna istruzione osservabile cambia mai. Stessa natura del mutante equivalente
+    // gia' dimostrato per getType() (TC-QS-55).
     @Test
-    @DisplayName("TC-QS-58 (tentativo aggiuntivo, da verificare con PIT): 3 indirizzi, ordinamento e accoppiamento election")
+    @DisplayName("TC-QS-58 (chiusura PIT confermata): 3 indirizzi, ordinamento e accoppiamento election")
     void tcQs58_toStringThreeAddressesSortedAndPaired() throws ConfigException {
         System.setProperty(QuorumPeer.CONFIG_KEY_MULTI_ADDRESS_ENABLED, "true");
         QuorumServer qs = new QuorumServer(1L,
