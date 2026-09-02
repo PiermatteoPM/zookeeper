@@ -1,0 +1,38 @@
+# Da salvare come .github/workflows/mybuild.yml nel fork (branch m4-work).
+# Nome "MyBuild" per coerenza con quanto visto nello screenshot del collega (stesso pattern:
+# un workflow personale, dedicato, non quello ereditato da upstream).
+#
+# PRIMA DI FARE PUSH, verifica in locale:
+#  1) `java -version` sulla tua macchina: usa lo stesso numero in `java-version` sotto
+#     (dove giri gia' `mvn -pl zookeeper-server -am compile` con successo).
+#  2) Il nome esatto delle classi di test: sostituisci QuorumServerAddressStringTest e
+#     WorkerServiceTest sotto con i nomi reali dei tuoi file .java se sono diversi.
+
+name: MyBuild
+
+on:
+  push:
+    branches: [ m4-work ]
+  pull_request:
+    branches: [ m4-work ]
+  workflow_dispatch:      # ti permette anche di far partire una run a mano dalla tab Actions
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'   # <-- verifica contro la tua versione locale
+          cache: maven
+
+      - name: Compila zookeeper-server
+        run: mvn -pl zookeeper-server -am compile -B
+
+      - name: Esegue i test su QuorumServer e WorkerService
+        run: mvn -pl zookeeper-server -am test -Dtest=QuorumServerAddressStringTest,WorkerServiceTest -DfailIfNoTests=false -B
